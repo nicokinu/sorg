@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<title>Sorg</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; background:#111316; color:#e6e6e6; }
+  header { display:flex; gap:10px; align-items:center; padding:12px 16px; border-bottom:1px solid #2a2d33; position:sticky; top:0; background:#111316; z-index:5; }
+  header h1 { font-size:15px; margin:0 12px 0 0; }
+  button, select { background:#22262c; color:#e6e6e6; border:1px solid #3a3f47; border-radius:6px; padding:6px 12px; font-size:13px; cursor:pointer; }
+  button:hover { background:#2c3138; }
+  button.primary { background:#2f6feb; border-color:#2f6feb; }
+  button.danger { background:#5a1e1e; border-color:#7a2a2a; }
+  #progress { font-size:12px; color:#8a919c; margin-left:auto; }
+  #grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:12px; padding:16px; }
+  .card { background:#191c21; border:1px solid #2a2d33; border-radius:10px; overflow:hidden; cursor:pointer; position:relative; }
+  .card.selected { outline:2px solid #2f6feb; }
+  .card img { width:100%; height:120px; object-fit:cover; object-position:top; display:block; background:#000; }
+  .card .body { padding:8px; }
+  .card .name { font-size:11px; color:#aab1bb; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .badge { display:inline-block; font-size:11px; padding:2px 8px; border-radius:99px; margin-top:4px; }
+  .b-tech{background:#1d3a5f}.b-work{background:#3a2f5f}.b-finance{background:#1f4d38}
+  .b-personal{background:#5f2f4a}.b-reference{background:#4d401f}.b-entertainment{background:#5f301f}
+  .b-no-text,.b-pending,.b-other,.b-unclassified{background:#33373d;color:#9aa1ab}
+  .conf { font-size:10px; color:#7a828d; margin-top:3px; }
+  .check { position:absolute; top:6px; left:6px; width:18px; height:18px; border-radius:4px; border:2px solid #666; background:rgba(0,0,0,.5); }
+  .card.selected .check { background:#2f6feb; border-color:#2f6feb; }
+  #empty { padding:60px; text-align:center; color:#6a7280; }
+  #chips { display:flex; gap:8px; padding:10px 16px 0; flex-wrap:wrap; }
+  .chip { background:#1d2127; border:1px solid #2a2d33; border-radius:99px; padding:4px 12px; font-size:12px; cursor:pointer; }
+  .chip:hover { border-color:#3a3f47; }
+  .chip.active { border-color:#2f6feb; color:#7fb0ff; }
+  .chip .n { color:#8a919c; margin-left:4px; }
+  .hint { font-size:11px; color:#6a7280; padding:8px 16px 0; }
+  dialog { background:#191c21; color:#e6e6e6; border:1px solid #3a3f47; border-radius:12px; padding:20px; width:360px; }
+  dialog::backdrop { background:rgba(0,0,0,.6); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Sorg</h1>
+  <select id="category">
+    <option value="tech">tech</option><option value="work">work</option>
+    <option value="finance">finance</option><option value="personal">personal</option>
+    <option value="reference">reference</option><option value="entertainment">entertainment</option>
+    <option value="other">other</option>
+  </select>
+  <button class="primary" id="btn-organize">選択を整理</button>
+  <button class="danger" id="btn-trash">選択をゴミ箱</button>
+  <button id="btn-scan">再スキャン</button>
+  <button id="btn-classify">未分類を判定</button>
+  <button id="btn-reclassify">全再判定</button>
+  <span id="progress"></span>
+</header>
+<div id="chips"></div>
+<div id="grid"></div>
+<div id="empty" hidden>スクリーンショットが見つかりません。「再スキャン」か、Desktop にスクショを撮ってください</div>
+<dialog id="dlg">
+  <p id="dlg-msg"></p>
+  <div style="display:flex;gap:8px;justify-content:flex-end">
+    <button id="dlg-cancel">キャンセル</button>
+    <button class="primary" id="dlg-ok">実行</button>
+  </div>
+</dialog>
+<dialog id="add-dlg">
+  <p style="margin:0 0 8px">新しいカテゴリ</p>
+  <input id="add-name" placeholder="カテゴリ名(例: recipes)" style="width:100%;margin-bottom:8px;background:#22262c;color:#e6e6e6;border:1px solid #3a3f47;border-radius:6px;padding:6px 10px" />
+  <textarea id="add-criteria" placeholder="判定基準の説明(Ollayaに教える内容)。例: 料理レシピ・材料リスト・作り方画面" style="width:100%;height:64px;background:#22262c;color:#e6e6e6;border:1px solid #3a3f47;border-radius:6px;padding:6px 10px"></textarea>
+  <p style="font-size:11px;color:#8a919c">追加後、「未分類を判定」を再実行すると新しいカテゴリでも判定されるようになります。</p>
+  <div style="display:flex;gap:8px;justify-content:flex-end">
+    <button id="add-cancel">キャンセル</button>
+    <button class="primary" id="add-ok">追加</button>
+  </div>
+</dialog>
+<script type="module">
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+
+let shots = [];
+let cats = []; // list_categories の結果 {name, criteria, count}
+const selected = new Set();
+let filterCat = null;
+const grid = document.getElementById("grid");
+const chips = document.getElementById("chips");
+
+async function refresh() {
+  shots = await invoke("list_shots", { dir: null });
+  cats = await invoke("list_categories");
+  syncCategorySelect();
+  renderChips();
+  render();
+}
+
+function syncCategorySelect() {
+  const sel = document.getElementById("category");
+  const prev = sel.value;
+  sel.innerHTML = "";
+  const names = [...new Set([...cats.map(c => c.name), "other", "no-text"])];
+  for (const n of names.sort()) {
+    const o = document.createElement("option");
+    o.value = n;
+    o.textContent = n;
+    sel.appendChild(o);
+  }
+  if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+}
+
+function counts() {
+  const m = new Map();
+  for (const s of shots) {
+    const c = s.category ?? "pending";
+    m.set(c, (m.get(c) ?? 0) + 1);
+  }
+  return m;
+}
+
+function renderChips() {
+  chips.innerHTML = "";
+  const m = counts();
+  const mk = (label, cat, n) => {
+    const el = document.createElement("span");
+    el.className = "chip" + ((filterCat === cat) ? " active" : "");
+    el.innerHTML = `${label}<span class="n">${n}</span>`;
+    el.onclick = () => {
+      filterCat = (filterCat === cat) ? null : cat;
+      renderChips();
+      render();
+    };
+    chips.appendChild(el);
+    // カテゴリチップの上に「整理先○枚」の情報も持つのは deleteCategory 側
+  };
+  mk("すべて", null, shots.length);
+  for (const [c, n] of [...m.entries()].sort((a, b) => b[1] - a[1])) {
+    mk(c, c, n);
+    if (c !== "no-text" && c !== "pending") {
+      const archived = cats.find(x => x.name === c);
+      const sel = document.createElement("span");
+      sel.className = "chip";
+      sel.textContent = `${c} を全选択`;
+      sel.onclick = () => selectCategory(c);
+      chips.appendChild(sel);
+      const del = document.createElement("span");
+      del.className = "chip";
+      del.textContent = `× ${c}${archived && archived.count > 0 ? ` (${archived.count}枚戻す)` : ""}`;
+      del.title = "カテゴリを削除(判定基準から外し、整理済みのファイルはDesktopへ戻す)";
+      del.onclick = () => deleteCategory(c);
+      chips.appendChild(del);
+    }
+  }
+  const all = document.createElement("span");
+  all.className = "chip";
+  all.textContent = "全選択";
+
+  const add = document.createElement("span");
+  add.className = "chip";
+  add.textContent = "＋ カテゴリ追加";
+  add.onclick = addCategoryDialog;
+  chips.appendChild(add);
+  all.onclick = () => { shots.forEach(s => selected.add(s.id)); render(); };
+  const none = document.createElement("span");
+  none.className = "chip";
+  none.textContent = "選択解除";
+  none.onclick = () => { selected.clear(); render(); };
+  chips.appendChild(all);
+  chips.appendChild(none);
+}
+
+function selectCategory(cat) {
+  for (const s of shots) if (s.category === cat) selected.add(s.id);
+  document.getElementById("category").value =
+    [...document.getElementById("category").options].some(o => o.value === cat) ? cat : "other";
+  render();
+}
+
+async function deleteCategory(cat) {
+  const info = cats.find(c => c.name === cat);
+  const n = info ? info.count : 0;
+  const msg = n > 0
+    ? `カテゴリ「${cat}」を削除します。移動済みの ${n} 枚は Desktop に戻します(整理先が散らからないようにするためです)。よければ「実行」:`
+    : `カテゴリ「${cat}」を判定基準から削除します。よければ「実行」:`;
+  confirmDlg(msg, async () => {
+    const back = await invoke("delete_category", { name: cat, return_files: true });
+    document.getElementById("progress").textContent =
+      `「${cat}」を削除しました${back > 0 ? `(${back} 枚をDesktopへ戻しました)` : ""}`;
+    filterCat = null;
+    await refresh();
+  });
+}
+
+function addCategoryDialog() {
+  const dlg = document.getElementById("add-dlg");
+  document.getElementById("add-name").value = "";
+  document.getElementById("add-criteria").value = "";
+  dlg.showModal();
+  document.getElementById("add-ok").onclick = async () => {
+    const name = document.getElementById("add-name").value.trim();
+    const criteria = document.getElementById("add-criteria").value.trim();
+    if (!name) return;
+    try {
+      await invoke("add_category", { name, criteria: criteria || name });
+      dlg.close();
+      document.getElementById("progress").textContent = `カテゴリ「${name}」を追加しました`;
+      await refresh();
+    } catch (e) {
+      document.getElementById("progress").textContent = "追加に失敗: " + e;
+    }
+  };
+  document.getElementById("add-cancel").onclick = () => dlg.close();
+}
+
+function visible() {
+  return filterCat ? shots.filter(s => (s.category ?? "pending") === filterCat) : shots;
+}
+
+function render() {
+  grid.innerHTML = "";
+  const items = visible();
+  document.getElementById("empty").hidden = shots.length > 0;
+  const hint = document.getElementById("hint");
+  if (hint) hint.remove();
+  if (selected.size > 0) {
+    const h = document.createElement("div");
+    h.id = "hint";
+    h.className = "hint";
+    h.textContent = `${selected.size} 枚選択中`;
+    grid.before(h);
+  }
+  for (const s of items) {
+    const card = document.createElement("div");
+    card.className = "card" + (selected.has(s.id) ? " selected" : "");
+    const conf = s.confidence != null ? `conf ${s.confidence.toFixed(2)} · keep ${s.keep.toFixed(2)}` : "未判定";
+    card.innerHTML = `
+      <div class="check"></div>
+      <img src="${convertFileSrc(s.path)}" loading="lazy" />
+      <div class="body">
+        <div class="name" title="${s.name}">${s.name}</div>
+        <span class="badge b-${s.category ?? "pending"}">${s.category ?? "pending"}</span>
+        <div class="conf">${conf}</div>
+      </div>`;
+    card.onclick = (e) => {
+      if (e.metaKey || e.ctrlKey) { // Shift相当:カテゴリ一括選択
+        const c = s.category ?? "pending";
+        const allIn = shots.filter(x => (x.category ?? "pending") === c);
+        const on = allIn.every(x => selected.has(x.id));
+        allIn.forEach(x => on ? selected.delete(x.id) : selected.add(x.id));
+      } else if (selected.has(s.id)) {
+        selected.delete(s.id);
+      } else {
+        selected.add(s.id);
+      }
+      render();
+    };
+    grid.appendChild(card);
+  }
+}
+
+document.getElementById("btn-scan").onclick = refresh;
+async function startClassify(force) {
+  const prog = document.getElementById("progress");
+  try {
+    const n = await invoke("classify_pending", { dir: null, force });
+    prog.textContent = `${n} 枚を判定中...`;
+    pollStats();
+  } catch (e) {
+    prog.textContent = "判定の開始に失敗: " + e;
+  }
+}
+document.getElementById("btn-classify").onclick = () => startClassify(false);
+document.getElementById("btn-reclassify").onclick = () => {
+  confirmDlg("全ファイルを OCR から再判定します(カテゴリ判定基準を変えたときに。整理済みの分類結果も上書きされます)", () => startClassify(true));
+};
+
+async function pollStats() {
+  const prog = document.getElementById("progress");
+  try {
+    const s = await invoke("classify_stats");
+    if (s.running) {
+      prog.textContent = `${s.done}/${s.total}: ${s.current}`;
+      setTimeout(pollStats, 500);
+    } else {
+      const err = s.last_error ? ` (${s.last_error})` : "";
+      prog.textContent = `判定完了: ${s.done}/${s.total} 枚${err}`;
+      refresh();
+    }
+  } catch (e) {
+    prog.textContent = "進捗取得失敗: " + e;
+  }
+}
+
+function confirmDlg(msg, fn) {
+  const dlg = document.getElementById("dlg");
+  document.getElementById("dlg-msg").textContent = msg;
+  dlg.showModal();
+  document.getElementById("dlg-ok").onclick = async () => {
+    dlg.close();
+    await fn();
+    await refresh();
+  };
+  document.getElementById("dlg-cancel").onclick = () => dlg.close();
+}
+
+document.getElementById("btn-organize").onclick = () => {
+  const files = shots.filter(s => selected.has(s.id)).map(s => s.path);
+  const cat = document.getElementById("category").value;
+  confirmDlg(`${files.length} 枚を「${cat}」へ移動します`, async () => {
+    const n = await invoke("organize", { files, category: cat });
+    document.getElementById("progress").textContent = `${n} 枚を整理しました`;
+    selected.clear();
+  });
+};
+document.getElementById("btn-trash").onclick = () => {
+  const files = shots.filter(s => selected.has(s.id)).map(s => s.path);
+  confirmDlg(`${files.length} 枚をゴミ箱に移動します(完全削除ではありません)`, async () => {
+    const n = await invoke("trash", { files });
+    document.getElementById("progress").textContent = `${n} 枚をゴミ箱へ`;
+    selected.clear();
+  });
+};
+
+refresh();
+</script>
+</body>
+</html>
